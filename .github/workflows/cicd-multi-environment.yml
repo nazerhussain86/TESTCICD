@@ -1,0 +1,123 @@
+name: Multi-Environment CI/CD to IIS
+
+on:
+  push:
+    branches:
+      - main
+      - QA
+      - Test
+  pull_request:
+    branches:
+      - main # Optional: Build and Test PRs targeting main, but don't deploy
+      - QA   # Optional: Build and Test PRs targeting QA
+      - Test # Optional: Build and Test PRs targeting Test
+
+jobs:
+  # -------------------- BUILD AND TEST JOB (Common for all branches) --------------------
+  build_and_test:
+    name: Build and Test Application
+    runs-on: self-hosted # Or windows-latest if not deploying from this job directly and dependencies are simple
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v1
+      with:
+        nuget-version: 'latest'
+
+    - name: Restore NuGet packages
+      run: nuget restore YourSolutionName.sln # Replace YourSolutionName.sln
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
+
+    - name: Build Application
+      run: msbuild YourSolutionName.sln /p:Configuration=Release # Build in Release for all
+
+    # (Optional but Recommended) Run Unit Tests
+    # - name: Run Unit Tests
+    #   run: vstest.console.exe YourTestProject/bin/Release/YourTestProject.dll /logger:trx
+    #   continue-on-error: false
+
+    - name: Package for Web Deploy
+      run: |
+        msbuild YourMvcProject/YourMvcProject.csproj /p:Configuration=Release /p:Platform="Any CPU" /T:Package /p:PackageLocation="${{ github.workspace }}/WebApp.zip"
+      # Replace YourMvcProject/YourMvcProject.csproj
+
+    - name: Upload WebApp Package Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: WebAppPackage
+        path: ${{ github.workspace }}/WebApp.zip
+        retention-days: 7 # Adjust as needed
+
+  # -------------------- DEPLOY TO TEST ENVIRONMENT --------------------
+  deploy_to_test:
+    name: Deploy to TEST Environment
+    needs: build_and_test # Depends on the build_and_test job completing successfully
+    if: github.ref == 'refs/heads/Test' && github.event_name == 'push' # Only run on push to Test branch
+    runs-on: self-hosted # Runner that can reach the TEST IIS server
+    environment: # Optional: Define a GitHub Environment for 'Test' for visibility and protection rules
+      name: Test
+      url: http://test.yourapp.com # Optional: URL to the Test environment
+
+    steps:
+    - name: Download WebApp Package Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: WebAppPackage
+        path: ${{ github.workspace }}
+
+    - name: Deploy to TEST IIS
+      run: |
+        & "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe" -verb:sync -source:package='${{ github.workspace }}\WebApp.zip' -dest:auto,computerName='https:// ${{ secrets.TEST_IIS_SERVER_ADDRESS }}:8172/msdeploy.axd?site=${{ secrets.TEST_IIS_WEBSITE_NAME }}',userName='${{ secrets.TEST_IIS_USERNAME }}',password='${{ secrets.TEST_IIS_PASSWORD }}',authtype='Basic' -allowUntrustedCertificate -enableRule:AppOffline
+      # Adjust paths and parameters as per your setup
+
+  # -------------------- DEPLOY TO QA ENVIRONMENT --------------------
+  deploy_to_qa:
+    name: Deploy to QA Environment
+    needs: build_and_test
+    if: github.ref == 'refs/heads/QA' && github.event_name == 'push' # Only run on push to QA branch
+    runs-on: self-hosted # Runner that can reach the QA IIS server
+    environment:
+      name: QA
+      url: http://qa.yourapp.com
+
+    steps:
+    - name: Download WebApp Package Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: WebAppPackage
+        path: ${{ github.workspace }}
+
+    - name: Deploy to QA IIS
+      run: |
+        & "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe" -verb:sync -source:package='${{ github.workspace }}\WebApp.zip' -dest:auto,computerName='https:// ${{ secrets.QA_IIS_SERVER_ADDRESS }}:8172/msdeploy.axd?site=${{ secrets.QA_IIS_WEBSITE_NAME }}',userName='${{ secrets.QA_IIS_USERNAME }}',password='${{ secrets.QA_IIS_PASSWORD }}',authtype='Basic' -allowUntrustedCertificate -enableRule:AppOffline
+
+  # -------------------- DEPLOY TO PRODUCTION ENVIRONMENT --------------------
+  deploy_to_prod:
+    name: Deploy to PRODUCTION Environment
+    needs: build_and_test # Could also depend on deploy_to_qa if you want a stricter pipeline
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' # Only run on push to main branch
+    runs-on: self-hosted # Runner that can reach the PROD IIS server
+    environment: # Define a GitHub Environment for 'Production'
+      name: Production
+      url: http://www.yourapp.com
+      # Add protection rules to this environment if needed (e.g., required reviewers for deployment)
+
+    steps:
+    - name: Download WebApp Package Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: WebAppPackage
+        path: ${{ github.workspace }}
+
+    # Optional: Manual Approval Step for Production (if using GitHub Environments with protection rules)
+    # If you configure the 'Production' environment in GitHub settings (Repository > Settings > Environments)
+    # to require approval, the workflow will pause here until an authorized person approves.
+
+    - name: Deploy to PRODUCTION IIS
+      run: |
+        & "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe" -verb:sync -source:package='${{ github.workspace }}\WebApp.zip' -dest:auto,computerName='https:// ${{ secrets.PROD_IIS_SERVER_ADDRESS }}:8172/msdeploy.axd?site=${{ secrets.PROD_IIS_WEBSITE_NAME }}',userName='${{ secrets.PROD_IIS_USERNAME }}',password='${{ secrets.PROD_IIS_PASSWORD }}',authtype='Basic' -allowUntrustedCertificate -enableRule:AppOffline
